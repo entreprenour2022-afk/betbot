@@ -1,3 +1,0 @@
-python -m venv venv
-venv\Scripts\activate
-pip install requests python-telegram-bot python-dotenv apscheduler
