@@ -6,6 +6,12 @@ from dotenv import load_dotenv
 from telegram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
+from predictor import predict_probability
+
+# =========================
+# VARIABLES .ENV
+# =========================
+
 load_dotenv()
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -14,123 +20,301 @@ API_KEY = os.getenv("ODDS_API_KEY")
 
 bot = Bot(token=TOKEN)
 
-# Guardar IDs ya enviados
-sent_games = set()
+# =========================
+# ARCHIVO ANTI DUPLICADOS
+# =========================
+
+SENT_FILE = "App/sent_games.txt"
+
+if not os.path.exists(SENT_FILE):
+
+    with open(SENT_FILE, "w") as f:
+        pass
+
+with open(SENT_FILE, "r") as f:
+
+    sent_games = set(
+        line.strip() for line in f
+    )
+
+# =========================
+# DEPORTES
+# =========================
 
 sports = [
 
-    # NBA
     "basketball_nba",
 
-    # Liga Peruana
     "soccer_peru_liga_1",
 
-    # Brasileirao
     "soccer_brazil_campeonato",
 
-    # Liga Argentina
     "soccer_argentina_primera_division",
 
-    # MLS
     "soccer_usa_mls",
 
-    # MLB
-    "baseball_mlb",
-
-    # Tenis ATP
-    "tennis_atp_french_open",
-
-    # Tenis WTA
-    "tennis_wta_french_open"
+    "baseball_mlb"
 ]
 
-async def send_games():
+# =========================
+# RATINGS BASE
+# =========================
 
-    print("Buscando partidos...")
+def get_team_rating(team, sport):
+
+    ratings = {
+
+        # NBA
+        "Boston Celtics": 0.10,
+        "Denver Nuggets": 0.09,
+        "Los Angeles Lakers": 0.08,
+        "Golden State Warriors": 0.07,
+
+        # Soccer
+        "Palmeiras": 0.09,
+        "Flamengo": 0.08,
+        "River Plate": 0.08,
+        "Universitario": 0.06,
+        "Alianza Lima": 0.05,
+
+        # MLB
+        "New York Yankees": 0.09,
+        "Los Angeles Dodgers": 0.10,
+        "Houston Astros": 0.08
+    }
+
+    return ratings.get(team, 0.05)
+
+# =========================
+# HEARTBEAT
+# =========================
+
+async def heartbeat():
+
+    try:
+
+        await bot.send_message(
+
+            chat_id=CHAT_ID,
+            text="✅ BOT ONLINE"
+        )
+
+        print("HEARTBEAT OK")
+
+    except Exception as e:
+
+        print("ERROR HEARTBEAT:", e)
+
+# =========================
+# ESCANEO
+# =========================
+
+async def scan_games():
+
+    print("ESCANEO EJECUTADO")
 
     for sport in sports:
 
-        print(f"DEPORTE: {sport}")
+        try:
 
-        url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds/?apiKey={API_KEY}&regions=us&markets=h2h"
+            print(f"DEPORTE: {sport}")
 
-        response = requests.get(url)
+            url = f"https://api.the-odds-api.com/v4/sports/{sport}/odds/?apiKey={API_KEY}&regions=us&markets=h2h"
 
-        print("STATUS:", response.status_code)
+            response = requests.get(url)
 
-        data = response.json()
+            print("STATUS:", response.status_code)
 
-        if not data:
-            print("No hay partidos disponibles")
-            continue
+            if response.status_code == 429:
 
-        for game in data[:3]:
+                print("LIMITE API")
+                continue
 
-            try:
+            if response.status_code != 200:
 
-                # ID único del partido
-                game_id = game.get("id")
+                print("ERROR API")
+                continue
 
-                # Evitar duplicados
-                if game_id in sent_games:
-                    print("Partido ya enviado")
-                    continue
+            data = response.json()
 
-                bookmakers = game.get("bookmakers", [])
+            if not data:
 
-                if not bookmakers:
-                    continue
+                print("SIN PARTIDOS")
+                continue
 
-                outcomes = bookmakers[0]["markets"][0]["outcomes"]
+            for game in data[:5]:
 
-                team1 = outcomes[0]["name"]
-                odd1 = outcomes[0]["price"]
+                try:
 
-                team2 = outcomes[1]["name"]
-                odd2 = outcomes[1]["price"]
+                    game_id = game["id"]
 
-                message = f"""
-🔥 BETBOT MULTIDEPORTE
+                    if game_id in sent_games:
+
+                        print("YA ENVIADO")
+                        continue
+
+                    home = game["home_team"]
+                    away = game["away_team"]
+
+                    bookmakers = game.get(
+                        "bookmakers",
+                        []
+                    )
+
+                    if len(bookmakers) < 2:
+
+                        print("POCOS BOOKMAKERS")
+                        continue
+
+                    outcomes1 = bookmakers[0]["markets"][0]["outcomes"]
+                    outcomes2 = bookmakers[1]["markets"][0]["outcomes"]
+
+                    for i in range(2):
+
+                        team = outcomes1[i]["name"]
+
+                        odd1 = outcomes1[i]["price"]
+                        odd2 = outcomes2[i]["price"]
+
+                        best_odd = max(
+                            odd1,
+                            odd2
+                        )
+
+                        # =========================
+                        # RATINGS IA
+                        # =========================
+
+                        team_rating = get_team_rating(
+                            team,
+                            sport
+                        )
+
+                        opponent = away if team == home else home
+
+                        opponent_rating = get_team_rating(
+                            opponent,
+                            sport
+                        )
+
+                        # =========================
+                        # MACHINE LEARNING
+                        # =========================
+
+                        probability = predict_probability(
+
+                            best_odd,
+                            team_rating,
+                            opponent_rating,
+                            1
+                        )
+
+                        # =========================
+                        # EV
+                        # =========================
+
+                        ev = (
+                            probability * best_odd
+                        ) - 1
+
+                        print("TEAM:", team)
+                        print("ODD:", best_odd)
+                        print("PROB:", probability)
+                        print("EV:", ev)
+
+                        # =========================
+                        # FILTRO VALUE
+                        # =========================
+
+                        if ev <= -0.10:
+
+                            print("NO VALUE")
+                            continue
+
+                        # =========================
+                        # MENSAJE
+                        # =========================
+
+                        message = f"""
+🔥 VALUE BET IA
 
 🏆 {sport}
 
-⚔️ {team1} vs {team2}
+⚔️ {home} vs {away}
 
-📊 Cuotas:
-🏠 {team1} → {odd1}
-✈️ {team2} → {odd2}
+🎯 PICK:
+{team}
+
+📊 CUOTA:
+{best_odd}
+
+🧠 PROBABILIDAD IA:
+{round(probability * 100, 1)}%
+
+📈 EV:
+{round(ev, 2)}
 """
 
-                await bot.send_message(
-                    chat_id=CHAT_ID,
-                    text=message
-                )
+                        await bot.send_message(
 
-                print(message)
+                            chat_id=CHAT_ID,
+                            text=message
+                        )
 
-                # Guardar partido enviado
-                sent_games.add(game_id)
+                        print("MENSAJE ENVIADO")
 
-            except Exception as e:
+                        sent_games.add(game_id)
 
-                print("ERROR:", e)
+                        with open(SENT_FILE, "a") as f:
+
+                            f.write(
+                                game_id + "\n"
+                            )
+
+                except Exception as e:
+
+                    print("ERROR PARTIDO:", e)
+
+        except Exception as e:
+
+            print("ERROR DEPORTE:", e)
+
+# =========================
+# MAIN
+# =========================
 
 async def main():
 
     scheduler = AsyncIOScheduler()
 
+    # ESCANEO 30 MIN
     scheduler.add_job(
-        send_games,
+
+        scan_games,
         "interval",
-        minutes=5
+        minutes=30
+    )
+
+    # HEARTBEAT 1 HORA
+    scheduler.add_job(
+
+        heartbeat,
+        "interval",
+        hours=1
     )
 
     scheduler.start()
 
-    print("BOT MULTIDEPORTE INICIADO")
+    print("BOT IA INICIADO")
 
-    await send_games()
+    await heartbeat()
+
+    await scan_games()
 
     await asyncio.Event().wait()
+
+# =========================
+# INICIAR
+# =========================
 
 asyncio.run(main())
